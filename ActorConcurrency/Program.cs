@@ -1,79 +1,91 @@
 ﻿using ActorSort;
+using PowerArgs;
 using Proto;
 using System.Diagnostics;
 using System.Text;
 
+const int _iterations = 20;
+const int _arraySize = 10_000_000;
+int _poolSize = Environment.ProcessorCount;
 
-const int iterations = 20;
-const int arraySize = 10_000_000;
-int poolSize = Environment.ProcessorCount;
+Dictionary<string, (Func<CommandArgs, CommandOptions, Task>, CommandOptions)> commands = new ()
+{
+    { "sort",                   (SortDirectly,   new (_iterations, _arraySize, false, false, false))},
+    { "actor_sort",             (SortWithActors, new (_iterations, _arraySize, false, false, false))},
+    { "actor_sort_async",       (SortWithActors, new (_iterations, _arraySize, true, false, false))},
+    { "actor_sort_split",       (SortWithActors, new (_iterations, _arraySize, false, true, false))},
+    { "actor_sort_async_split", (SortWithActors, new (_iterations, _arraySize, true, true, false))},
+    
+    { "char_pairs",              (TestSingleThreadedCharCount, new (_iterations, _arraySize, false, false, false))},
+    { "actor_char_pairs",        (TestCharCountActors,         new (_iterations, _arraySize, false, false, false))},
+    { "actor_char_pairs_pooled", (TestCharCountActors,         new (_iterations, _arraySize, false, false, true))},
+    { "task_char_pairs",         (TestCharCountWithTasks,      new (_iterations, _arraySize, false, false, false))}
+};
 
-Console.WriteLine("Using pool size: {0}.", poolSize);
-Console.WriteLine("Using array size: {0}.", arraySize);
+var cmdArgs = args.Select(arg => arg.ToLower()).ToList();
+CheckArgs(commands, cmdArgs);
+
+Console.WriteLine("Using pool size: {0}.", _poolSize);
+Console.WriteLine("Using array size: {0}.", _arraySize);
 
 // Create the system and spawn one root actor.
 var system = new ActorSystem();
-var sorter = system.Root.Spawn(SorterActor.Props(poolSize));
-var charCounter = system.Root.Spawn(UniqueCharCounterActor.Props(poolSize));
+var sorter = system.Root.Spawn(SorterActor.Props(_poolSize));
+var charCounter = system.Root.Spawn(UniqueCharCounterActor.Props(_poolSize));
 
 var rng = new Random();
-var data = CreateRandomArray(rng, arraySize);
+var data = CreateRandomArray(rng, _arraySize);
 
-await RunTests(iterations, system, sorter, charCounter, data, args);
+await RunTests(commands, new CommandArgs(system, sorter, charCounter, data), cmdArgs);
+
+static void CheckArgs(
+    IReadOnlyDictionary<string, (Func<CommandArgs, CommandOptions, Task>, CommandOptions)> commands,
+    IEnumerable<string> args)
+{
+    bool fail = false;
+
+    if (!args.Any())
+    {
+        fail = true;
+    }
+    else
+    {
+        foreach (var command in args)
+        {
+            if (!commands.ContainsKey(command))
+            {
+                Console.WriteLine("Unknown command: '{0}'", command);
+                fail = true;
+            }
+        }
+    }
+
+    if (fail)
+    {
+        Console.WriteLine("Valid command:");
+        foreach (var command in commands.Keys)
+        {
+            Console.WriteLine(command);
+        }
+        Environment.Exit(-1);
+    }
+}
 
 static async Task RunTests(
-    int iterations,
-    ActorSystem system,
-    PID sorter,
-    PID charCounter,
-    IReadOnlyList<int> data,
+    IReadOnlyDictionary<string, (Func<CommandArgs, CommandOptions, Task>, CommandOptions)> commands,
+    CommandArgs commandArgs,
     IEnumerable<string> args)
 {
     Console.WriteLine("Press any key to start test...");
     Console.ReadKey();
     Console.WriteLine("Running...");
 
-    if (args.Contains("sort"))
+    foreach (var command in args)
     {
-        SortDirectly(data, iterations);       
-    }
-    if (args.Contains("actor_sort"))
-    {
-        await SortWithActors(system, sorter, data, iterations, false, false);
-    }
-    if (args.Contains("actor_sort_async"))
-    {
-        await SortWithActors(system, sorter, data, iterations, true, false);
-    }
-    if (args.Contains("actor_sort_split"))
-    {
-        await SortWithActors(system, sorter, data, iterations, false, true);
-    }
-    if (args.Contains("actor_sort_async_split"))
-    {
-        await SortWithActors(system, sorter, data, iterations, true, true);
-    }
-    if (args.Contains("tests_sorted"))
-    {
-        await TestIsSorted(system, sorter, data, false);
-        await TestIsSorted(system, sorter, data, true);
-    }
-
-    if (args.Contains("char_pairs"))
-    {
-        TestSingleThreadedCharCount("les_miserables.txt");
-    }
-    if (args.Contains("actor_char_pairs"))
-    {
-        await TestCharCountActors(system, charCounter, "les_miserables.txt", false);
-    }
-    if (args.Contains("actor_char_pairs_pooled"))
-    {
-        await TestCharCountActors(system, charCounter, "les_miserables.txt", true);
-    }
-    if (args.Contains("task_char_pairs"))
-    {
-        await TestCharCountWithTasks("les_miserables.txt");
+        if (commands.TryGetValue(command, out var funcAndOpts))
+        {
+            await funcAndOpts.Item1(commandArgs, funcAndOpts.Item2);
+        }
     }
 
     Console.WriteLine("Running...DONE");
@@ -91,85 +103,86 @@ static List<int> CreateRandomArray(Random rng, int size)
 }
 
 // Sorts the given list using normal single threaded sorting.
-static void SortDirectly(IReadOnlyList<int> data, int iterations)
+static Task SortDirectly(CommandArgs args, CommandOptions opts)
 {
-    Console.WriteLine("Sort directly, iterations: {0}", iterations);
+    Console.WriteLine("Sort directly, iterations: {0}", opts.Iterations);
 
     var sw = Stopwatch.StartNew();
 
-    for (int i = 0; i < iterations; ++i)
+    for (int i = 0; i < opts.Iterations; ++i)
     {
-        _ = SorterFuncs.Sort(data);
+        _ = SorterFuncs.Sort(args.Data);
     }
 
     var elapsed = sw.ElapsedMilliseconds;
 
     Console.WriteLine("Sort directly, iterations: {0}, took: {1} ms ({2} ms/iter).\n",
-        iterations, elapsed, elapsed / iterations);
+        opts.Iterations, elapsed, elapsed / opts.Iterations);
+
+    return Task.CompletedTask;
 }
 
 
 /// <summary>Sorts the given list using actors</summary>
 /// <param name="fullAsync">Dispatch all iterations asynchronously. Otherwise will dispatch one iteration at time.</param>
 /// <param name="allowSplit">Allow splitting a single iteration to subranges</param>
-static async Task SortWithActors(
-    ActorSystem system, PID sorter, IReadOnlyList<int> data, int iterations, bool fullAsync, bool allowSplit)
+static async Task SortWithActors(CommandArgs args, CommandOptions opts)
 {
     Console.WriteLine("Sort with actors ({0}, {1})",
-        fullAsync ? "full async" : "one at a time",
-        allowSplit ? "use split" : "no split");
+        opts.FullAsync ? "full async" : "one at a time",
+        opts.AllowSplit ? "use split" : "no split");
 
     var sw = Stopwatch.StartNew();
 
-    if (fullAsync)
+    if (opts.FullAsync)
     {
-        var tasks = new List<Task>(iterations);
-        for (int i = 0; i < iterations; ++i)
+        var tasks = new List<Task>(opts.Iterations);
+        for (int i = 0; i < opts.Iterations; ++i)
         {
             tasks.Add(
-                system.Root.RequestAsync<Sorted>(sorter, new Sort(data, allowSplit), CancellationToken.None));
+                args.System.Root.RequestAsync<Sorted>(args.Sorter, new Sort(args.Data, opts.AllowSplit), CancellationToken.None));
         }
         await Task.WhenAll(tasks);
     }
     else
     {
-        for (int i = 0; i < iterations; ++i)
+        for (int i = 0; i < opts.Iterations; ++i)
         {
-            await system.Root.RequestAsync<Sorted>(sorter, new Sort(data, allowSplit), CancellationToken.None);
+            await args.System.Root.RequestAsync<Sorted>(args.Sorter, new Sort(args.Data, opts.AllowSplit), CancellationToken.None);
         }
     }
 
     var elapsed = sw.ElapsedMilliseconds;
 
-    Console.WriteLine("Sort with actors ({0}, {1}), took: {2} ({3} ms/iter).\n",
-        fullAsync ? "full async" : "one at a time",
-        allowSplit ? "use split" : "no split",
+    Console.WriteLine("Sort with actors ({0}, {1}), took: {2} ms ({3} ms/iter).\n",
+        opts.FullAsync ? "full async" : "one at a time",
+        opts.AllowSplit ? "use split" : "no split",
         elapsed,
-        elapsed / iterations);
+        elapsed / opts.Iterations);
 }
 
-static async Task TestIsSorted(ActorSystem system, PID sorter, IReadOnlyList<int> data, bool allowSplit)
+static async Task TestIsSorted(CommandArgs args, CommandOptions opts)
 {
-    if (data.Count != arraySize)
+    if (args.Data.Count != opts.ArraySize)
     {
-        Console.WriteLine("Wrong size data, used split: {0}", allowSplit ? "yes" : "no");
+        Console.WriteLine("Wrong size data, used split: {0}", opts.AllowSplit ? "yes" : "no");
         return;
     }
-    var result = await system.Root.RequestAsync<Sorted>(sorter, new Sort(data, allowSplit), CancellationToken.None);
+    var result = await args.System.Root.RequestAsync<Sorted>(args.Sorter, new Sort(args.Data, opts.AllowSplit), CancellationToken.None);
     var isSorted = SorterFuncs.IsSorted(result.SortedData);
 
-    Console.WriteLine("Data sorted: {0}, used split: {1}", isSorted, allowSplit ? "yes" : "no");
+    Console.WriteLine("Data sorted: {0}, used split: {1}", isSorted, opts.AllowSplit ? "yes" : "no");
 }
 
 /// <summary>Find word pairs from given file which have maximum amount of distinct letters.</summary>
-static void TestSingleThreadedCharCount(string fileName)
+static Task TestSingleThreadedCharCount(CommandArgs args, CommandOptions opts)
 {
     Console.WriteLine("Running single threaded char count...");
 
     // @note takes over 5-10mins
     const long TimeCutOffMs = 20 * 60 * 1000;
 
-    var words = ReadWordsFromFile(fileName, true);
+    var words = ReadWordsFromFile(args.TestFileName, true);
 
     Console.WriteLine("Possible combinations: {0}", (long)words.Count * words.Count);
 
@@ -227,15 +240,17 @@ static void TestSingleThreadedCharCount(string fileName)
     }
 
     Console.WriteLine("Running single threaded char count...DONE");
+
+    return Task.CompletedTask;
 }
 
 /// <summary>Find word pairs from given file which have maximum amount of distinct letters using actors.</summary>
 /// <param name="usePool">Use actor pool instead maximum number amount of actors.</param>
-static async Task TestCharCountActors(ActorSystem system, PID charCounter, string fileName, bool usePool)
+static async Task TestCharCountActors(CommandArgs args, CommandOptions opts)
 {
     Console.WriteLine("Running char count with actor...");
 
-    var words = ReadWordsFromFile(fileName, true);
+    var words = ReadWordsFromFile(args.TestFileName, true);
 
     Console.WriteLine("Possible combinations: {0}", (long)words.Count * words.Count);
 
@@ -243,8 +258,8 @@ static async Task TestCharCountActors(ActorSystem system, PID charCounter, strin
 
     try
     {
-        var result = await system.Root.RequestAsync<UniqueChars>(
-            charCounter, new CountUniqueChars(words, usePool), CancellationTokens.FromSeconds(300));
+        var result = await args.System.Root.RequestAsync<UniqueChars>(
+            args.CharCounter, new CountUniqueChars(words, opts.UsePool), CancellationTokens.FromSeconds(300));
 
         var elapsed = sw.ElapsedMilliseconds;
 
@@ -262,11 +277,11 @@ static async Task TestCharCountActors(ActorSystem system, PID charCounter, strin
 }
 
 /// <summary>Find word pairs from given file which have maximum amount of distinct letters using C# task system.</summary>
-static async Task TestCharCountWithTasks(string fileName)
+static async Task TestCharCountWithTasks(CommandArgs args, CommandOptions opts)
 {
     Console.WriteLine("Running char count with tasks...");
 
-    var words = ReadWordsFromFile(fileName, true);
+    var words = ReadWordsFromFile(args.TestFileName, true);
 
     Console.WriteLine("Possible combinations: {0}", (long)words.Count * words.Count);
 
@@ -315,3 +330,17 @@ static IReadOnlyList<string> ReadWordsFromFile(string fileName, bool unique)
 
     return words;
 }
+
+record struct CommandArgs(
+    ActorSystem System,
+    PID Sorter,
+    PID CharCounter,
+    IReadOnlyList<int> Data,
+    string TestFileName = "les_miserables.txt");
+
+record struct CommandOptions(
+    int Iterations,
+    int ArraySize,
+    bool FullAsync,
+    bool AllowSplit,
+    bool UsePool);
