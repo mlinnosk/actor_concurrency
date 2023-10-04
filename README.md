@@ -16,7 +16,6 @@ execute a test.
 * actor_sort_async - Sort using actors, spawn all iterations at once.
 * actor_sort_split - Sort using actors, split the range in smaller pieces.
 * actor_sort_async_split - Sort using actors, combine split and async.
-* tests_sorted - Just test that sorting methods actually sort.
 * char_pairs - Find the maximum number of unique chars in word pairs formed from the test data.
 * actor_char_pairs - Same as 'char_pais' with actors.
 * actor_char_pairs_pooled - Same as 'char_pais' with actors using a worker pool.
